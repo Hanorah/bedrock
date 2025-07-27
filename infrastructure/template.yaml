@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Bedrock Spend Sentinel - serverless per-team Bedrock usage metering,
+  budget enforcement, and AI-drafted spend alerts.
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+  BudgetsJson:
+    Type: String
+    Description: >
+      JSON map of team name to 24-hour USD budget, e.g.
+      {"growth": 5.0, "platform": 10.0}
+    Default: '{"default": 5.0}'
+
+  AlertEmail:
+    Type: String
+    Description: Email address to receive spend alert notifications.
+    AllowedPattern: "^[^@]+@[^@]+\\.[^@]+$"
+    ConstraintDescription: Must be a valid email address.
+
+  SummaryModelId:
+    Type: String
+    Description: Bedrock model ID used to draft alert summaries.
+    Default: us.anthropic.claude-haiku-4-5-20251001-v1:0
+
+  AnomalyMultiplier:
+    Type: Number
+    Description: >
+      Trigger a spend-spike alert when the last hour's spend exceeds
+      the rolling hourly baseline by this multiple.
+    Default: 1.5
+    MinValue: 1.0
+
+  ScheduleRate:
+    Type: String
+    Description: EventBridge schedule expression for the aggregator.
+    Default: rate(15 minutes)
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # ------------------------------------------------------------------
+  # DynamoDB - usage table
+  # ------------------------------------------------------------------
+  UsageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: spend-sentinel-usage
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: team
+          AttributeType: S
+        - AttributeName: sort_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: team
+          KeyType: HASH
+        - AttributeName: sort_key
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: bedrock-spend-sentinel
+
+  # ------------------------------------------------------------------
+  # SNS - alert topic
+  # ------------------------------------------------------------------
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: spend-sentinel-alerts
+      Tags:
+        - Key: Project
+          Value: bedrock-spend-sentinel
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ------------------------------------------------------------------
+  # IAM - proxy Lambda role
+  # ------------------------------------------------------------------
+  ProxyLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: spend-sentinel-proxy-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: spend-sentinel-proxy-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BedrockConverse
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+              - Sid: DynamoDBWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt UsageTable.Arn
+      Tags:
+        - Key: Project
+          Value: bedrock-spend-sentinel
+
+  # ------------------------------------------------------------------
+  # IAM - aggregator Lambda role
+  # ------------------------------------------------------------------
+  AggregatorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: spend-sentinel-aggregator-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: spend-sentinel-aggregator-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: BedrockConverse
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+              - Sid: DynamoDBRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: !GetAtt UsageTable.Arn
+              - Sid: SNSPublish
+                Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AlertTopic
+      Tags:
+        - Key: Project
+          Value: bedrock-spend-sentinel
+
+  # ------------------------------------------------------------------
+  # Lambda - proxy
+  # ------------------------------------------------------------------
+  ProxyLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: spend-sentinel-proxy
+      Description: Bedrock proxy that logs per-call token usage and cost to DynamoDB.
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt ProxyLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          # Placeholder - deploy actual code with the deploy script or CI/CD pipeline.
+          def lambda_handler(event, context):
+              return {"error": "placeholder - deploy real code"}
+      Environment:
+        Variables:
+          USAGE_TABLE_NAME: !Ref UsageTable
+      Tags:
+        Project: bedrock-spend-sentinel
+
+  # ------------------------------------------------------------------
+  # Lambda - aggregator
+  # ------------------------------------------------------------------
+  AggregatorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: spend-sentinel-aggregator
+      Description: Checks team spend against budgets and baselines every 15 minutes and fires SNS alerts.
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt AggregatorLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          # Placeholder - deploy actual code with the deploy script or CI/CD pipeline.
+          def lambda_handler(event, context):
+              return {"error": "placeholder - deploy real code"}
+      Environment:
+        Variables:
+          USAGE_TABLE_NAME: !Ref UsageTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          SUMMARY_MODEL_ID: !Ref SummaryModelId
+          BUDGETS_USD_24H: !Ref BudgetsJson
+          ANOMALY_MULTIPLIER: !Ref AnomalyMultiplier
+      Tags:
+        Project: bedrock-spend-sentinel
+
+  # ------------------------------------------------------------------
+  # EventBridge - schedule the aggregator
+  # ------------------------------------------------------------------
+  AggregatorScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: spend-sentinel-schedule
+      Description: Triggers the spend-sentinel-aggregator on a fixed interval.
+      ScheduleExpression: !Ref ScheduleRate
+      State: ENABLED
+      Targets:
+        - Id: AggregatorLambdaTarget
+          Arn: !GetAtt AggregatorLambda.Arn
+
+  AggregatorSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AggregatorLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AggregatorScheduleRule.Arn
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  UsageTableName:
+    Description: DynamoDB table for usage records.
+    Value: !Ref UsageTable
+    Export:
+      Name: !Sub "${AWS::StackName}-UsageTable"
+
+  AlertTopicArn:
+    Description: SNS topic ARN for spend alerts.
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-AlertTopic"
+
+  ProxyLambdaArn:
+    Description: ARN of the proxy Lambda. Configure team apps to invoke this.
+    Value: !GetAtt ProxyLambda.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ProxyLambda"
+
+  AggregatorLambdaArn:
+    Description: ARN of the aggregator Lambda.
+    Value: !GetAtt AggregatorLambda.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-AggregatorLambda"
